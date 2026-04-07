@@ -934,6 +934,19 @@
                 </el-radio>
               </el-radio-group>
             </el-form-item>
+            <el-divider content-position="left">IPv6 设置</el-divider>
+            <el-form-item label="支持 IPv6">
+              <el-switch v-model="mosdnsEnableIpv6" />
+              <div style="margin-top: 8px; color: #909399; font-size: 12px">
+                全局开关：是否解析并返回 AAAA (IPv6) 记录
+              </div>
+            </el-form-item>
+            <el-form-item label="国外支持 IPv6" v-if="mosdnsEnableIpv6">
+              <el-switch v-model="mosdnsRemoteEnableIpv6" />
+              <div style="margin-top: 8px; color: #909399; font-size: 12px">
+                仅针对国外查询：开启后国外域名也将尝试解析 IPv6 地址。如果你的代理环境不支持 IPv6，请关闭此项以避免连接延迟。
+              </div>
+            </el-form-item>
           </el-form>
         </el-tab-pane>
 
@@ -1510,7 +1523,11 @@ const mosdnsApiAddress = ref('0.0.0.0:8338')
 const availableRuleSets = ref<RuleSet[]>([])
 const availableRules = ref<any[]>([])
 const savingMosdnsSettings = ref(false)
+// IPv6 相关状态
+const mosdnsEnableIpv6 = ref(true)          // 全局 IPv6 开关
+const mosdnsRemoteEnableIpv6 = ref(false)   // 国外专用 IPv6 开关
 
+  
 // 备份配置
 const backupDialogVisible = ref(false)
 const backupForm = ref({
@@ -2316,6 +2333,12 @@ const showMosdnsSettingsDialog = async () => {
     mosdnsLocalDns.value = dnsResponse.data.local_dns || ''
     mosdnsRemoteDns.value = dnsResponse.data.remote_dns || ''
     mosdnsFallbackDns.value = dnsResponse.data.fallback_dns || ''
+
+    // 加载 IPv6 设置，增加默认值兼容逻辑
+    mosdnsEnableIpv6.value = dnsResponse.data.enable_ipv6 !== undefined ? dnsResponse.data.enable_ipv6 : true
+    mosdnsRemoteEnableIpv6.value = dnsResponse.data.remote_enable_ipv6 !== undefined ? dnsResponse.data.remote_enable_ipv6 : false
+    
+      : false
     // 解析 DNS 文本为条目数组
     mosdnsLocalDnsEntries.value = parseDnsText(mosdnsLocalDns.value)
     mosdnsRemoteDnsEntries.value = parseDnsText(mosdnsRemoteDns.value)
@@ -2380,11 +2403,13 @@ const saveMosdnsSettings = async () => {
     const remoteDnsText = dnsEntriesToText(mosdnsRemoteDnsEntries.value)
     const fallbackDnsText = dnsEntriesToText(mosdnsFallbackDnsEntries.value)
 
-    // 保存 DNS 服务器配置
+    // 保存 DNS 服务器配置（包含 IPv6 开关）
     await api.post('/mosdns/dns-servers', {
       local_dns: localDnsText,
       remote_dns: remoteDnsText,
       fallback_dns: fallbackDnsText,
+      enable_ipv6: mosdnsEnableIpv6.value,
+      remote_enable_ipv6: mosdnsRemoteEnableIpv6.value,
       default_forward: mosdnsDefaultForward.value,
       custom_hosts: mosdnsCustomHosts.value
     })
