@@ -511,6 +511,10 @@ def generate_mosdns_config(config_data: Dict[str, Any], base_url: str = '') -> s
     # 获取 MosDNS 配置（从嵌套结构中读取）
     mosdns_config_data = config_data.get('mosdns', {})
 
+    # 新增：从配置中读取 IPv6 开关
+    enable_ipv6 = mosdns_config_data.get('enable_ipv6', True)
+    remote_enable_ipv6 = mosdns_config_data.get('remote_enable_ipv6', False)
+
     custom_matches_config = mosdns_config_data.get('custom_matches', [])
     custom_match_position = mosdns_config_data.get('custom_match_position', 'tail')
     parsed_custom_matches = _parse_custom_matches(custom_matches_config)
@@ -588,6 +592,18 @@ def generate_mosdns_config(config_data: Dict[str, Any], base_url: str = '') -> s
     # MosDNS 使用插件来实现各种功能，插件会在 sequence 中被调用
     plugins = []
 
+    # 新增：定义拦截 AAAA 记录的序列插件
+    plugins.append({
+        'tag': 'reject_aaaa',
+        'type': 'sequence',
+        'args': [
+            {
+                'matches': ['qtype 28'], 
+                'exec': 'reject 0'
+            }
+        ]
+    })
+
     # 合并直连和代理规则集 ID
     configured_ruleset_ids = set(direct_ruleset_ids + proxy_ruleset_ids)
 
@@ -597,7 +613,7 @@ def generate_mosdns_config(config_data: Dict[str, Any], base_url: str = '') -> s
     effective_base_url = server_domain or base_url
 
     # 1. 规则集加载插件 - 为每个规则集创建独立的 tag
-    # 新版 MosDNS 的 domain_set/ip_set 插件只支持本地文件路径
+    # 新版 MosDNS 的 domain_set/ip_set 插件只支持本地 file 路径
     # Agent 需要负责下载规则文件到本地
 
     # 用于存储规则集下载信息（供后续使用）
@@ -803,18 +819,25 @@ def generate_mosdns_config(config_data: Dict[str, Any], base_url: str = '') -> s
 
     # 7. 远程 DNS 序列插件
     # 主远程 DNS 查询序列，带错误处理和 TTL 设置
+    # 修改：支持 IPv6 开关
+    remote_dns_execs = []
+    if not enable_ipv6 or not remote_enable_ipv6:
+        remote_dns_execs.append({'exec': '$reject_aaaa'})
+    
+    remote_dns_execs.extend([
+        {'exec': 'query_summary forward_remote'},
+        {'exec': '$forward_remote'},
+        {
+            'matches': ['!has_resp'],
+            'exec': 'reject 3'  # 如果没有响应，返回 REFUSED
+        },
+        {'exec': 'ttl 1'}
+    ])
+
     plugins.append({
         'tag': 'remote_dns',
         'type': 'sequence',
-        'args': [
-            {'exec': 'query_summary forward_remote'},
-            {'exec': '$forward_remote'},
-            {
-                'matches': ['!has_resp'],
-                'exec': 'reject 3'  # 如果没有响应，返回 REFUSED
-            },
-            {'exec': 'ttl 1'}
-        ]
+        'args': remote_dns_execs
     })
 
     # 8. 远程 Fallback DNS 序列插件
@@ -847,22 +870,30 @@ def generate_mosdns_config(config_data: Dict[str, Any], base_url: str = '') -> s
 
     # 10. 国内 DNS 序列插件
     # 先查缓存，未命中再转发到国内 DNS
+    # 修改：支持 IPv6 开关
+    china_dns_execs = [
+        {'exec': '$lazy_cache'},
+        {
+            'matches': ['has_resp'],
+            'exec': 'accept'
+        }
+    ]
+    if not enable_ipv6:
+        china_dns_execs.append({'exec': '$reject_aaaa'})
+    
+    china_dns_execs.extend([
+        {'exec': 'query_summary forward_local'},
+        {'exec': '$forward_local'},
+        {
+            'matches': ['!has_resp'],
+            'exec': 'reject 3'
+        }
+    ])
+
     plugins.append({
         'tag': 'china_dns',
         'type': 'sequence',
-        'args': [
-            {'exec': '$lazy_cache'},
-            {
-                'matches': ['has_resp'],
-                'exec': 'accept'
-            },
-            {'exec': 'query_summary forward_local'},
-            {'exec': '$forward_local'},
-            {
-                'matches': ['!has_resp'],
-                'exec': 'reject 3'
-            }
-        ]
+        'args': china_dns_execs
     })
 
     # 11. 匹配插件 - 为配置的单条规则创建匹配器
@@ -978,8 +1009,9 @@ def generate_mosdns_config(config_data: Dict[str, Any], base_url: str = '') -> s
     sequence.append({'exec': 'metrics_collector metrics'})
 
     # 第二步：优先 IPv4
-    # 在某些网络环境中，IPv6 连接可能不稳定，优先使用 IPv4 可以提高成功率
-    sequence.append({'exec': 'prefer_ipv4'})
+    # 修改：只在全局禁用 IPv6 时保留此行为
+    if not enable_ipv6:
+        sequence.append({'exec': 'prefer_ipv4'})
 
     # 第三步：自定义 Hosts（如果有配置）
     # 优先级最高，在所有规则之前匹配
